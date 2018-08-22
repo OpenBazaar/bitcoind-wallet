@@ -212,7 +212,7 @@ func (w *BitcoindWallet) Start() {
 	args := w.BuildArguments(false)
 	client, _ := btcrpcclient.New(connCfg, nil)
 	w.rpcClient = client
-	go StartNotificationListener(client, w.listeners)
+	go StartNotificationListener(client, w.params, w.listeners)
 
 	cmd := exec.Command(w.binary, args...)
 	go cmd.Start()
@@ -266,6 +266,25 @@ func (w *BitcoindWallet) MasterPublicKey() *hd.ExtendedKey {
 	return w.masterPublicKey
 }
 
+func (w *BitcoindWallet) ChildKey(keyBytes []byte, chaincode []byte, isPrivateKey bool) (*hd.ExtendedKey, error) {
+	parentFP := []byte{0x00, 0x00, 0x00, 0x00}
+	var id []byte
+	if isPrivateKey {
+		id = w.params.HDPrivateKeyID[:]
+	} else {
+		id = w.params.HDPublicKeyID[:]
+	}
+	hdKey := hd.NewExtendedKey(
+		id,
+		keyBytes,
+		chaincode,
+		parentFP,
+		0,
+		0,
+		isPrivateKey)
+	return hdKey.Child(0)
+}
+
 func (w *BitcoindWallet) CurrentAddress(purpose wallet.KeyPurpose) btc.Address {
 	<-w.initChan
 	addr, _ := w.rpcClient.GetAccountAddress(Account)
@@ -283,7 +302,11 @@ func (w *BitcoindWallet) DecodeAddress(addr string) (btc.Address, error) {
 }
 
 func (w *BitcoindWallet) ScriptToAddress(script []byte) (btc.Address, error) {
-	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, w.params)
+	return scriptToAddress(script, w.params)
+}
+
+func scriptToAddress(script []byte, params *chaincfg.Params) (btc.Address, error) {
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, params)
 	if err != nil {
 		return nil, err
 	}
@@ -354,11 +377,35 @@ func (w *BitcoindWallet) Transactions() ([]wallet.Txn, error) {
 				return ret, err
 			}
 		}
+
+		var confirmations int32
+		var status wallet.StatusCode
+		confs := int32(height) - height + 1
+		if height <= 0 {
+			confs = height
+		}
+		switch {
+		case confs < 0:
+			status = wallet.StatusDead
+		case confs == 0 && time.Since(ts) <= time.Hour*6:
+			status = wallet.StatusUnconfirmed
+		case confs == 0 && time.Since(ts) > time.Hour*6:
+			status = wallet.StatusStuck
+		case confs > 0 && confs < 6:
+			status = wallet.StatusPending
+			confirmations = confs
+		case confs > 5:
+			status = wallet.StatusConfirmed
+			confirmations = confs
+		}
+
 		t := wallet.Txn{
-			Txid:      r.TxID,
-			Value:     int64(amt.ToUnit(btc.AmountSatoshi)),
-			Height:    height,
-			Timestamp: ts,
+			Txid:          r.TxID,
+			Value:         int64(amt.ToUnit(btc.AmountSatoshi)),
+			Height:        height,
+			Timestamp:     ts,
+			Confirmations: int64(confirmations),
+			Status:        status,
 		}
 		ret = append(ret, t)
 	}
@@ -575,16 +622,6 @@ func (w *BitcoindWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 			if err != nil {
 				continue
 			}
-			op := wire.NewOutPoint(h, u.Vout)
-			script, err := hex.DecodeString(u.ScriptPubKey)
-			if err != nil {
-				continue
-			}
-			utxo := wallet.Utxo{
-				Op:           *op,
-				Value:        int64(u.Amount / 100000000),
-				ScriptPubkey: script,
-			}
 			addr, err := btc.DecodeAddress(u.Address, w.params)
 			if err != nil {
 				continue
@@ -593,13 +630,18 @@ func (w *BitcoindWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 			if err != nil {
 				continue
 			}
+			in := wallet.TransactionInput{
+				LinkedAddress: addr,
+				OutpointIndex: u.Vout,
+				OutpointHash:  h.CloneBytes(),
+				Value:         int64(u.Amount),
+			}
 			hdKey := hd.NewExtendedKey(w.params.HDPrivateKeyID[:], key.PrivKey.Serialize(), make([]byte, 32), make([]byte, 4), 0, 0, true)
-			transactionID, err := w.SweepAddress([]wallet.Utxo{utxo}, nil, hdKey, nil, wallet.FEE_BUMP)
+			transactionID, err := w.SweepAddress([]wallet.TransactionInput{in}, nil, hdKey, nil, wallet.FEE_BUMP)
 			if err != nil {
 				return nil, err
 			}
 			return transactionID, nil
-
 		}
 	}
 	return nil, spvwallet.BumpFeeNotFoundError
@@ -637,7 +679,8 @@ func (w *BitcoindWallet) GetFeePerByte(feeLevel wallet.FeeLevel) uint64 {
 func (w *BitcoindWallet) EstimateFee(ins []wallet.TransactionInput, outs []wallet.TransactionOutput, feePerByte uint64) uint64 {
 	tx := wire.NewMsgTx(wire.TxVersion)
 	for _, out := range outs {
-		output := wire.NewTxOut(out.Value, out.ScriptPubKey)
+		scriptPubKey, _ := txscript.PayToAddrScript(out.Address)
+		output := wire.NewTxOut(out.Value, scriptPubKey)
 		tx.TxOut = append(tx.TxOut, output)
 	}
 	estimatedSize := spvwallet.EstimateSerializeSize(len(ins), tx.TxOut, false, spvwallet.P2PKH)
@@ -692,7 +735,11 @@ func (w *BitcoindWallet) CreateMultisigSignature(ins []wallet.TransactionInput, 
 		tx.TxIn = append(tx.TxIn, input)
 	}
 	for _, out := range outs {
-		output := wire.NewTxOut(out.Value, out.ScriptPubKey)
+		scriptPubKey, err := txscript.PayToAddrScript(out.Address)
+		if err != nil {
+			return nil, err
+		}
+		output := wire.NewTxOut(out.Value, scriptPubKey)
 		tx.TxOut = append(tx.TxOut, output)
 	}
 
@@ -744,7 +791,11 @@ func (w *BitcoindWallet) Multisign(ins []wallet.TransactionInput, outs []wallet.
 		tx.TxIn = append(tx.TxIn, input)
 	}
 	for _, out := range outs {
-		output := wire.NewTxOut(out.Value, out.ScriptPubKey)
+		scriptPubKey, err := txscript.PayToAddrScript(out.Address)
+		if err != nil {
+			return nil, err
+		}
+		output := wire.NewTxOut(out.Value, scriptPubKey)
 		tx.TxOut = append(tx.TxOut, output)
 	}
 
@@ -808,7 +859,7 @@ func (w *BitcoindWallet) Multisign(ins []wallet.TransactionInput, outs []wallet.
 	return buf.Bytes(), nil
 }
 
-func (w *BitcoindWallet) SweepAddress(utxos []wallet.Utxo, address *btc.Address, key *hd.ExtendedKey, redeemScript *[]byte, feeLevel wallet.FeeLevel) (*chainhash.Hash, error) {
+func (w *BitcoindWallet) SweepAddress(ins []wallet.TransactionInput, address *btc.Address, key *hd.ExtendedKey, redeemScript *[]byte, feeLevel wallet.FeeLevel) (*chainhash.Hash, error) {
 	<-w.initChan
 	var internalAddr btc.Address
 	if address != nil {
@@ -824,11 +875,20 @@ func (w *BitcoindWallet) SweepAddress(utxos []wallet.Utxo, address *btc.Address,
 	var val int64
 	var inputs []*wire.TxIn
 	additionalPrevScripts := make(map[wire.OutPoint][]byte)
-	for _, u := range utxos {
-		val += u.Value
-		in := wire.NewTxIn(&u.Op, []byte{}, [][]byte{})
-		inputs = append(inputs, in)
-		additionalPrevScripts[u.Op] = u.ScriptPubkey
+	for _, in := range ins {
+		val += in.Value
+		ch, err := chainhash.NewHashFromStr(hex.EncodeToString(in.OutpointHash))
+		if err != nil {
+			return nil, err
+		}
+		script, err := txscript.PayToAddrScript(in.LinkedAddress)
+		if err != nil {
+			return nil, err
+		}
+		outpoint := wire.NewOutPoint(ch, in.OutpointIndex)
+		input := wire.NewTxIn(outpoint, []byte{}, [][]byte{})
+		inputs = append(inputs, input)
+		additionalPrevScripts[*outpoint] = script
 	}
 	out := wire.NewTxOut(val, script)
 
@@ -840,7 +900,7 @@ func (w *BitcoindWallet) SweepAddress(utxos []wallet.Utxo, address *btc.Address,
 			txType = spvwallet.P2SH_Multisig_Timelock_1Sig
 		}
 	}
-	estimatedSize := spvwallet.EstimateSerializeSize(len(utxos), []*wire.TxOut{out}, false, txType)
+	estimatedSize := spvwallet.EstimateSerializeSize(len(ins), []*wire.TxOut{out}, false, txType)
 
 	// Calculate the fee
 	feePerByte := int(w.GetFeePerByte(feeLevel))
@@ -916,7 +976,7 @@ func (w *BitcoindWallet) SweepAddress(utxos []wallet.Utxo, address *btc.Address,
 			}
 			txIn.SignatureScript = script
 		} else {
-			sig, err := txscript.RawTxInWitnessSignature(tx, hashes, i, utxos[i].Value, *redeemScript, txscript.SigHashAll, privKey)
+			sig, err := txscript.RawTxInWitnessSignature(tx, hashes, i, ins[i].Value, *redeemScript, txscript.SigHashAll, privKey)
 			if err != nil {
 				return nil, err
 			}
@@ -1013,16 +1073,12 @@ func (w *BitcoindWallet) GenerateMultisigScript(keys []hd.ExtendedKey, threshold
 	return addr, redeemScript, nil
 }
 
-func (w *BitcoindWallet) AddWatchedScript(script []byte) error {
-	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, w.params)
-	if err != nil {
-		return err
-	}
+func (w *BitcoindWallet) AddWatchedAddress(addr btc.Address) error {
 	select {
 	case <-w.initChan:
-		return w.addWatchedScript(addrs[0])
+		return w.addWatchedScript(addr)
 	default:
-		w.addrsToWatch = append(w.addrsToWatch, addrs[0])
+		w.addrsToWatch = append(w.addrsToWatch, addr)
 	}
 	return nil
 }
@@ -1062,4 +1118,3 @@ func DefaultSocksPort(controlPort int) int {
 	}
 	return socksPort
 }
-
