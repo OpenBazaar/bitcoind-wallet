@@ -10,6 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/OpenBazaar/spvwallet"
 	"github.com/OpenBazaar/spvwallet/exchangerates"
 	"github.com/OpenBazaar/wallet-interface"
@@ -28,13 +36,6 @@ import (
 	"github.com/op/go-logging"
 	b39 "github.com/tyler-smith/go-bip39"
 	"golang.org/x/net/proxy"
-	"os"
-	"os/exec"
-	"path"
-	"runtime"
-	"strconv"
-	"strings"
-	"time"
 )
 
 var log = logging.MustGetLogger("bitcoind")
@@ -420,9 +421,9 @@ func (w *BitcoindWallet) Transactions() ([]wallet.Txn, error) {
 
 func (w *BitcoindWallet) GetTransaction(txid chainhash.Hash) (wallet.Txn, error) {
 	<-w.initChan
-	includeWatchOnly := false
+	//includeWatchOnly := false
 	t := wallet.Txn{}
-	resp, err := w.rpcClient.GetTransaction(&txid, &includeWatchOnly)
+	resp, err := w.rpcClient.GetTransaction(&txid)
 	if err != nil {
 		return t, err
 	}
@@ -436,8 +437,8 @@ func (w *BitcoindWallet) GetTransaction(txid chainhash.Hash) (wallet.Txn, error)
 
 func (w *BitcoindWallet) GetConfirmations(txid chainhash.Hash) (uint32, uint32, error) {
 	<-w.initChan
-	includeWatchOnly := true
-	resp, err := w.rpcClient.GetTransaction(&txid, &includeWatchOnly)
+	//includeWatchOnly := true
+	resp, err := w.rpcClient.GetTransaction(&txid)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -500,7 +501,7 @@ func (w *BitcoindWallet) gatherCoins() (map[coinset.Coin]*hd.ExtendedKey, error)
 	return m, nil
 }
 
-func (w *BitcoindWallet) Spend(amount int64, addr btc.Address, feeLevel wallet.FeeLevel) (*chainhash.Hash, error) {
+func (w *BitcoindWallet) Spend(amount int64, addr btc.Address, feeLevel wallet.FeeLevel, referenceID string) (*chainhash.Hash, error) {
 	<-w.initChan
 	tx, err := w.buildTx(amount, addr, feeLevel)
 	if err != nil {
@@ -607,8 +608,8 @@ func (w *BitcoindWallet) buildTx(amount int64, addr btc.Address, feeLevel wallet
 
 func (w *BitcoindWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 	<-w.initChan
-	includeWatchOnly := false
-	tx, err := w.rpcClient.GetTransaction(&txid, &includeWatchOnly)
+	//includeWatchOnly := false
+	tx, err := w.rpcClient.GetTransaction(&txid)
 	if err != nil {
 		return nil, err
 	}

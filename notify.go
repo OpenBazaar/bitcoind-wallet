@@ -2,13 +2,14 @@ package bitcoind
 
 import (
 	"encoding/json"
+	"io/ioutil"
+	"net/http"
+	"time"
+
 	"github.com/OpenBazaar/wallet-interface"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	btcrpcclient "github.com/btcsuite/btcd/rpcclient"
-	"io/ioutil"
-	"net/http"
-	"time"
 )
 
 type NotificationListener struct {
@@ -34,7 +35,7 @@ func (l *NotificationListener) notify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	watchOnly := false
-	txInfo, err := l.client.GetTransaction(hash, &watchOnly)
+	txInfo, err := l.client.GetTransaction(hash)
 	if err != nil {
 		watchOnly = true
 	}
