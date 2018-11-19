@@ -35,7 +35,7 @@ func (l *NotificationListener) notify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	watchOnly := false
-	txInfo, err := l.client.GetTransaction(hash)
+	txInfo, err := l.client.GetTransaction(hash, &watchOnly)
 	if err != nil {
 		watchOnly = true
 	}

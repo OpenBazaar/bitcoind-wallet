@@ -421,9 +421,9 @@ func (w *BitcoindWallet) Transactions() ([]wallet.Txn, error) {
 
 func (w *BitcoindWallet) GetTransaction(txid chainhash.Hash) (wallet.Txn, error) {
 	<-w.initChan
-	//includeWatchOnly := false
+	includeWatchOnly := false
 	t := wallet.Txn{}
-	resp, err := w.rpcClient.GetTransaction(&txid)
+	resp, err := w.rpcClient.GetTransaction(&txid, &includeWatchOnly)
 	if err != nil {
 		return t, err
 	}
@@ -437,8 +437,8 @@ func (w *BitcoindWallet) GetTransaction(txid chainhash.Hash) (wallet.Txn, error)
 
 func (w *BitcoindWallet) GetConfirmations(txid chainhash.Hash) (uint32, uint32, error) {
 	<-w.initChan
-	//includeWatchOnly := true
-	resp, err := w.rpcClient.GetTransaction(&txid)
+	includeWatchOnly := true
+	resp, err := w.rpcClient.GetTransaction(&txid, &includeWatchOnly)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -608,8 +608,8 @@ func (w *BitcoindWallet) buildTx(amount int64, addr btc.Address, feeLevel wallet
 
 func (w *BitcoindWallet) BumpFee(txid chainhash.Hash) (*chainhash.Hash, error) {
 	<-w.initChan
-	//includeWatchOnly := false
-	tx, err := w.rpcClient.GetTransaction(&txid)
+	includeWatchOnly := false
+	tx, err := w.rpcClient.GetTransaction(&txid, &includeWatchOnly)
 	if err != nil {
 		return nil, err
 	}
